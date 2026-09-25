@@ -1,0 +1,36 @@
+Package: pseudopost
+Title: Pseudo-Posterior Uncertainty Adjustment for Composite and Pseudo-Likelihood Stan Models
+Version: 0.0.0.9000
+Authors@R:
+    person("Hok Chio (Mark)", "Lai", , "marklhc@gmail.com", role = c("aut", "cre"))
+Description: Post-hoc covariance (sandwich) adjustment for Bayesian models fit to
+    composite, pairwise, or otherwise pseudo-likelihood-based Stan models via
+    'cmdstanr'. For such models the naive inverse-Hessian posterior covariance is
+    generally miscalibrated; 'pseudopost' provides post-hoc covariance
+    (infinitesimal jackknife / Godambe sandwich) adjustments targeting the
+    robust covariance to improve scale and coverage. It implements
+    (1) an analytic point Godambe sandwich (the 'CurvAdj' family),
+    (2) a draw-based infinitesimal jackknife (IJ) target estimated from the
+    MCMC draws -- both a fast regression-proxy variant and a literal
+    per-observation score variant in the style of Shaby (2014)
+    <doi:10.1080/10618600.2013.842174> -- and (3) a scalar magnitude
+    (scale) adjustment. Adjustments are returned as corrected
+    standard errors / credible intervals and as affine-transformed posterior draws.
+License: GPL (>= 3)
+URL: https://github.com/marklai/pseudopost
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+VignetteBuilder: knitr
+Imports:
+    numDeriv
+Suggests:
+    cmdstanr (>= 0.7.2),
+    testthat (>= 3.0.0),
+    roxygen2,
+    posterior (>= 1.0.0),
+    lavaan,
+    knitr,
+    rmarkdown,
+    Rcpp
+Config/testthat/edition: 3
+Config/roxygen2/version: 8.1.0

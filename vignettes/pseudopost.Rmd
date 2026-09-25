@@ -1,0 +1,152 @@
+---
+title: "Adjusted Inference for Pseudo Posterior Distributions"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{pseudopost}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r setup}
+library(pseudopost)
+```
+
+These days genAI has really become quite powerful, or [persistent](https://www.natesilver.net/p/were-not-ready-for-superpersistent), which makes them increasingly capable of doing coding tasks, like converting scripts and ideas into an R package. Just a few months ago, I wouldn't imagine I would have the time to make a package for the ideas below, but now AI agents can do it in a few days. And it was built by a local model [Qwen3.8-27B](https://recipes.vllm.ai/Qwen/Qwen3.8-27B), which is relatively slow compared to frontier models on the cloud.
+
+So here's this package, `pseudopost`, which implements the "Open-Faced Sandwich" (OFS) by [Shaby (2014)](https://www.tandfonline.com/doi/pdf/10.1080/10618600.2013.842174) and the "Infinitesimal Jackknife" by [Giordano & Broderick, 2024](https://arxiv.org/abs/2305.06466) for adjusted inference with Markov Chain Monte Carlo (MCMC) draws when using a pseudo-likelihood.
+
+To illustrate, consider the classic Besag pseudo-likelihood for the Ising model. The Ising model, which originated in statistical physics and later widely used in network analysis, describes the joint distribution of a set of binary random variables. Consider a set of $p$ binary variables $X = (X_1, X_2, \ldots, X_p)$, where each $X_i$ can take values in $\{0, 1\}$ (originally it was {-1, 1}). In the Ising model, the joint distribution of $X$ is given by:
+$$
+P(x_1, x_2, \ldots, x_p) = \frac{1}{Z(\boldsymbol\theta)} \exp\left(\sum_{i=1}^{p} \theta_{ii} x_i + \sum_{i < j} \theta_{ij} x_i x_j\right),
+$$
+where $\theta_{ij} = \theta_{ji}$ represents the interaction between variables $i$ and $j$. The normalizing constant is
+$$
+Z(\boldsymbol\theta) = \sum_{x_1, x_2, \ldots, x_p} \exp\left(\sum_{i=1}^{p} \theta_{ii} x_i + \sum_{i < j} \theta_{ij} x_i x_j\right),
+$$
+which is intractable when $p$ is large. The [Besag pseudo-likelihood](https://rss.onlinelibrary.wiley.com/doi/abs/10.2307/2987782) sidesteps this by replacing the joint likelihood with a product of full conditionals. For variable $i$, the full conditional distribution is Bernoulli:
+$$
+P(X_i = 1 \mid \boldsymbol{x}_{-i}, \boldsymbol\theta) = \mathrm{logit}^{-1}(\eta_i),
+$$
+where
+$$
+\eta_i = \theta_{ii} + \sum_{j \neq i} \theta_{ij} x_j.
+$$
+
+Here, we consider an Ising model with a single common coupling, where $\theta_{ij} = \beta$ for all $i \neq j$, so that one shared coupling parameter $\beta$ captures the strength of interaction between every pair of variables (rather than a distinct $\theta_{ij}$ for each pair). We also denote $\theta_{ii} = \alpha_i$ for $i = 1, \ldots, p$, the variable-specific intercepts, giving $p + 1$ parameters in total.
+
+For one individual $r$ with symptom profile $x_r = (x_{r1}, \ldots, x_{rp})$, the Besag pseudo-likelihood factorizes over the $p$ symptoms into a product of full conditionals:
+$$
+\text{PLL}_r(\boldsymbol{\alpha}, \beta) = \prod_{i=1}^{p} \text{Bernoulli}\bigl(x_{ri} \;\big|\; \text{logit}^{-1}(\eta_{ri})\bigr),
+$$
+so each *individual* $r$ contributes one pseudo-observation, the sum of the $p$ conditional log-probabilities over their symptoms, $\ell_r = \sum_{i} \texttt{bernoulli\_logit\_lpmf}(x_{ri} \mid \eta_{ri})$. The full *log* pseudo-likelihood is then $\sum_{r=1}^{n} \ell_r$ (equivalently, the full pseudo-likelihood is the product of the individual contributions $\exp(\ell_r)$) — one pseudo-observation per individual, not one per symptom.
+
+Because the pseudo-likelihood is not a true likelihood, the naive MCMC pseudo-posterior has asymptotic covariance $Q^{-1}$ (one "bread" of the sandwich) rather than the correct Godambe covariance $V = Q^{-1}PQ^{-1}$. The `pseudopost` package corrects this: the infinitesimal jackknife (`"ij"`) estimates $V$ directly from the draws without further model evaluation; the closed sandwich (`"sandwich"`) and open-faced sandwich (`"ofs"`) compute $Q$ (Hessian) and $P$ (score) explicitly and apply the appropriate draw transform.
+
+```{r, include = FALSE}
+pp_stan <- identical(Sys.getenv("PP_EXAMPLES_STAN"), "1") &&
+  requireNamespace("cmdstanr", quietly = TRUE)
+```
+
+## A worked example: PTSD symptom network
+
+Consider a network of five binary PTSD symptoms: intrusion, avoidance, negative cognitions, hyperarousal, and emotional numbing. Each variable $X_i \in \{0, 1\}$ indicates whether symptom $i$ is present in a given individual. The Ising model here has six parameters: five symptom-specific intercepts $\alpha_1 \ldots \alpha_5$ (marginal propensities) and one common coupling $\beta$ (the average tendency for symptoms to co-occur).
+
+We simulate $n = 250$ individuals from this model with $\boldsymbol{\alpha} = (-1.5, -0.5, 0, -0.75, 0.25)$ and $\beta = 0.5$ using a Gibbs sampler. Each individual's symptom profile contributes one pseudo-observation (the sum of the five conditional log-probabilities), so the Godambe sandwich clusters scores at the individual level.
+
+```{r ising-data}
+p <- 5L
+n <- 250L
+true_alpha <- c(-1.5, -0.5, 0, -0.75, 0.25)
+true_beta  <- 0.5
+
+simulate_ising <- function(p, alpha, beta, n, seed = 42L, sweeps = 200L) {
+  set.seed(seed)
+  x <- matrix(0L, n, p)
+  for (r in 1:n) {
+    x[r, ] <- rbinom(p, 1, 0.5)
+    for (sw in 1:sweeps) {
+      for (i in 1:p) {
+        eta <- alpha[i] + beta * (sum(x[r, ]) - x[r, i])
+        x[r, i] <- rbinom(1, 1, plogis(eta))
+      }
+    }
+  }
+  x
+}
+
+x_mat <- simulate_ising(p, true_alpha, true_beta, n)
+dat  <- list(n = n, p = p, x = x_mat,
+             magnitude_adj = 1.0, use_priors = 1L)
+init <- list(list(alpha = rep(0, 5), beta = 0.0))
+params <- c(paste0("alpha[", 1:5, "]"), "beta")
+```
+
+```{r ising-fit, eval = pp_stan}
+library(cmdstanr)
+model <- cmdstan_model(
+  system.file("test-models", "ising.stan", package = "pseudopost"),
+  force_recompile = TRUE, quiet = TRUE)
+fit <- model$sample(data = dat, chains = 2L, iter_warmup = 500L,
+                    iter_sampling = 1000L, seed = 42L, refresh = 0,
+                    show_messages = FALSE)
+```
+
+```{r ising-adjust, eval = pp_stan}
+pp <- adjust_pseudo_posterior(
+  fit, params,
+  estimator = c("ij", "sandwich", "ofs"),
+  bread = "hessian_mle", meat = "score",
+  ci = "quantile",
+  model = model, data = dat, init = init,
+  verbose = FALSE)
+print(pp)
+```
+
+For a true likelihood the information equality gives $P = Q$ and every correction is near-identity. For the pseudo-likelihood the three estimators give different SEs. The OFS applies $\Omega = (Q^{-1}P)^{1/2}$ directly to the centered draws without calibrating to the empirical draw covariance $C_{\text{emp}}$, so it reproduces the closed sandwich only in the "one-bread" case $C_{\text{emp}} = Q^{-1}$. Here the bread is the negative Hessian at the MLE, whereas the MCMC draws' empirical covariance $C_{\text{emp}}$ is not that inverse; the one-bread OFS accordingly falls between the model-blind IJ and the closed sandwich for every parameter (and is in fact closer to each of them than the two are to one another).
+
+## Comparison with the full likelihood
+
+For five symptoms the partition function has only $2^5 = 32$ terms, so the exact likelihood is computable. We fit the full-likelihood model with the same data, priors, and MCMC settings and compare the resulting posterior standard deviations with the pseudo-likelihood fits.
+
+```{r ising-full-data}
+all_configs <- as.matrix(expand.grid(rep(list(0:1), p)))
+dat_full <- list(n = n, p = p, x = x_mat,
+                 num_configs = 32L, all_configs = all_configs)
+```
+
+```{r ising-full-fit, eval = pp_stan}
+model_full <- cmdstan_model(
+  system.file("test-models", "ising_full.stan", package = "pseudopost"),
+  force_recompile = TRUE, quiet = TRUE)
+fit_full <- model_full$sample(data = dat_full, chains = 2L, iter_warmup = 500L,
+                              iter_sampling = 1000L, seed = 42L, refresh = 0,
+                              show_messages = FALSE)
+```
+
+```{r ising-compare, eval = pp_stan}
+draws_pl  <- fit$draws(params, format = "draws_matrix")
+se_pl     <- apply(draws_pl, 2, sd)
+draws_fl  <- fit_full$draws(params, format = "draws_matrix")
+se_fl     <- apply(draws_fl, 2, sd)
+se_ij     <- pp$table$se[pp$table$method == "ij.quant"]
+se_sand   <- pp$table$se[pp$table$method == "sandwich.mle.score.quant"]
+se_ofs    <- pp$table$se[pp$table$method == "ofs.mle.score.quant"]
+cmp <- data.frame(
+  param      = params,
+  pl_naive   = se_pl,
+  ij         = se_ij,
+  sandwich   = se_sand,
+  ofs        = se_ofs,
+  full_lik   = se_fl
+)
+knitr::kable(cmp, digits = 4)
+```
+
+The naive pseudo-posterior SEs fall below the full-likelihood SEs for every parameter — the pseudo-posterior is overconfident, most so for the coupling $\beta$ (0.0562 against 0.0639). All three corrections inflate the SEs back toward the full-likelihood values: the closed sandwich (Hessian bread) is the most conservative and overshoots, running above the full-likelihood for every parameter, while the IJ and the one-bread OFS straddle the full-likelihood SEs and stay close to them.

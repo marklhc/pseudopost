@@ -1,0 +1,8 @@
+^tools$
+^AGENTS\.md$
+^\.Rproj\.user$
+^.*\.Rproj$
+# Compiled Stan model executables (build artifacts from cmdstan_model): any
+# extensionless file in test-models (the .stan sources are kept).
+^inst/test-models/[^./]*$
+^README\.Rmd$

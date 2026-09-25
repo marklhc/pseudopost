@@ -1,0 +1,7 @@
+inst/doc
+
+# Compiled Stan model executables (cmdstanr build artifacts; rebuilt on demand
+# by the Stan-backed tests). Ignore everything in test-models except the .stan
+# sources.
+inst/test-models/*
+!inst/test-models/*.stan
