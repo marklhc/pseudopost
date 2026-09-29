@@ -1,8 +1,12 @@
 ^tools$
 ^AGENTS\.md$
+^TASK-simulation-vignette\.md$
 ^\.Rproj\.user$
 ^.*\.Rproj$
 # Compiled Stan model executables (build artifacts from cmdstan_model): any
 # extensionless file in test-models (the .stan sources are kept).
 ^inst/test-models/[^./]*$
 ^README\.Rmd$
+^_pkgdown\.yml$
+^docs$
+^pkgdown$

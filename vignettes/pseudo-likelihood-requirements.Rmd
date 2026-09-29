@@ -1,137 +1,119 @@
 ---
-title: "The pseudo-likelihood requirements"
+title: "Model requirements for pseudo-posterior adjustment"
 package: pseudopost
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{The pseudo-likelihood requirements}
+  %\VignetteIndexEntry{Model requirements for pseudo-posterior adjustment}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
 
 ```{r, include = FALSE}
-# Load the package so its S3 methods (print/summary/as.data.frame.pseudo_post)
-# are registered for every chunk below. R CMD check installs the package into
-# the vignette library, so this is safe in all environments.
+# Register package methods for the examples.
 suppressMessages(library(pseudopost))
 
-# The Stan-backed chunks (compile + sample) run only when opted in, so this
-# vignette builds in any environment. Set PP_EXAMPLES_STAN=1 and install the
-# CmdStan toolchain to run them.
+# Opt in to compilation and sampling with PP_EXAMPLES_STAN=1.
 pp_stan <- identical(Sys.getenv("PP_EXAMPLES_STAN"), "1") &&
   requireNamespace("cmdstanr", quietly = TRUE)
 ```
 
-## Why adjust the pseudo-posterior at all?
+## Why adjust a pseudo-posterior?
 
-When a Stan model is fit to a *composite*, *pairwise*, or otherwise
-*pseudo-likelihood* target, the function being sampled (treated as if it were
-a likelihood) is **not** a true joint log-likelihood. The posterior that MCMC
-recovers is therefore the posterior of the pseudo-likelihood, and the
-**naive** posterior covariance
-(the inverse Hessian, or simply the sample covariance of the draws) is
-generally *miscalibrated*: it is often, but not always, *liberal*
-(understating the true variability, so that standard errors/uncertainty estimates are too small and
-credible intervals too narrow).
+In pairwise likelihoods, several dependent item-pair terms come from the same
+respondent. Treating their product as an ordinary likelihood can produce
+pseudo-posterior intervals that are too narrow or too wide for repeated-sampling
+inference.
 
-`pseudopost` provides post-hoc covariance (sandwich) adjustments that target
-the robust covariance $V = H^{-1} J H^{-1}$ (Shaby, 2014) to improve scale and
-coverage without refitting the model---all exposed through a single entry
-point, `adjust_pseudo_posterior()`. This is an approximation to the correct
-uncertainty, not a guarantee of correct coverage:
+Write the composite log-likelihood as
+$\ell_c(\theta) = \sum_{r=1}^n \ell_r(\theta)$, where $r$ indexes
+**independent observational units** (people in the examples below). Each
+$\ell_r$ may itself sum several conditional or pairwise log-probabilities.
+Let $Q$ denote the curvature (the negative Hessian of the *total*
+$\ell_c$), and write $s_r = \nabla\ell_r$ for respondent $r$'s score.
+The score variability is estimated by
+$P = \sum_{r=1}^n (s_r - \bar s)(s_r - \bar s)^{\mathsf T}$.
+The sandwich covariance is $V = Q^{-1} P Q^{-1}$ (Godambe & Heyde, 1975).
+$Q$ and $P$ are the *bread* and *meat*, also denoted $H$ and $J$.
+With `bread = "mcmc"`, $Q$ is estimated as the inverse covariance of the
+unconstrained draws rather than a Hessian. These adjustments approximate
+sampling uncertainty without refitting MCMC; they do not guarantee
+finite-sample coverage.
 
-- an **infinitesimal jackknife** (`estimator = "ij"`) estimator — a
-  model-blind estimate of the full $V$ straight from the MCMC draws
-  (Giordano & Broderick, 2023);
-- a **closed** (`estimator = "sandwich"`) Godambe estimator with an explicit
-  precision `bread` ($H$) and score `meat` ($J$);
-- an **open-faced** (`estimator = "ofs"`) sandwich estimator (Shaby, 2014):
-  the same explicit `bread` ($Q$) and `meat` ($P$), applied as the draw
-  transform $\Omega = (Q^{-1} P)^{1/2}$ without calibrating to the empirical draw
-  covariance;
-- a `ci` type (`"quantile"` or `"wald"`).
+`adjust_pseudo_posterior()` offers three estimators:
 
-The `"ij"` estimator is the infinitesimal jackknife (IJ) of Giordano &
-Broderick (2023): it estimates the full $V$ directly from the draws without
-estimating $H$ or $J$ separately. It is related to, but not the same as,
-Shaby's (2014) "open-faced sandwich": that term denotes the half-sandwich
-$JH^{-1}$, which Shaby's adjustment joins to the quasi-posterior's own
-one-bread covariance $H^{-1}$ to complete $V$.
+- **Infinitesimal jackknife** (`estimator = "ij"`): estimates a covariance
+  target from the MCMC draws and per-unit log-likelihood contributions,
+  without explicitly computing a Hessian or per-unit score derivatives
+  (Giordano & Broderick, 2023). This interface uses the draw-based proxy IJ.
+- **Closed Godambe sandwich** (`estimator = "sandwich"`): estimates $Q$ and $P$
+  separately, then transforms the draws to have covariance $V$ on the
+  unconstrained parameter scale.
+- **Open-faced sandwich (OFS)** (`estimator = "ofs"`): estimates $Q$ and $P$
+  separately and applies $\Omega = (Q^{-1}P)^{1/2}$ directly to centered draws
+  (Shaby, 2014), without first matching their empirical covariance to $V$.
 
-The open-faced (`estimator = "ofs"`) estimator is the third option and
-Shaby's (2014) original adjustment. It takes the draws' own covariance
-$C_{\text{emp}}$ to be the bread $Q^{-1}$ (the "one-bread" asymptotic) and applies the
-draw transform $\Omega = (Q^{-1} P)^{1/2}$ directly to the centered draws,
-without measuring or inverting $C_{\text{emp}}$. The closed sandwich instead estimates
-the full $V = H^{-1} J H^{-1}$ and calibrates the adjusted draws to that target,
-so their (unconstrained) covariance equals $V$ by construction; the
-infinitesimal jackknife is model-blind, estimating $V$ from the draws alone.
-OFS and the closed sandwich agree when $C_{\text{emp}} = Q^{-1}$ (e.g. with
-`bread = "mcmc"` in one dimension, where $Q^{-1}$ is by construction the
-empirical draw covariance).
+OFS gives covariance $\Omega C_{\mathrm{emp}}\Omega^{\mathsf T}$, where
+$C_{\mathrm{emp}}$ is the covariance of the original unconstrained draws.
+It equals $V$ if $C_{\mathrm{emp}} = Q^{-1}$. With `bread = "mcmc"`, this
+holds by construction **in any dimension**: OFS and closed sandwich have the
+same unconstrained covariance, though transformed draws and nonlinear-parameter
+intervals can differ. With a Hessian bread, their covariances may differ.
 
-The four axes (`estimator`, `bread`, `meat`, `ci`) are orthogonal and each
-may be a vector, so a call runs a sub-grid with one row per parameter and
-valid combination. The `"ij"` estimator does not use `bread`/`meat`; the
-baseline (no robust covariance) is the legacy `methods = "noadj"` preset, and
-the original named presets remain as silent aliases for the axes.
+The `estimator`, `bread`, `meat`, and `ci` arguments accept vectors of choices.
+`bread` and `meat` do not apply to IJ. `methods = "noadj"` gives the unadjusted
+baseline; other legacy `methods` presets remain available.
 
-| axis        | values                                        | role |
-|-------------|-----------------------------------------------|------|
-| `estimator` | `"ij"`, `"sandwich"`, `"ofs"`                 | infinitesimal jackknife (model-blind $V$ from the draws), closed Godambe $H^{-1} J H^{-1}$, or open-faced draw transform $(Q^{-1} P)^{1/2}$ |
-| `bread`     | `"mcmc"`, `"hessian_mle"`, `"hessian_map"`    | the precision $H$; `"sandwich"`/`"ofs"` only |
-| `meat`      | `"score"`, `"score_avg"`                      | the score moment $J$; `"sandwich"`/`"ofs"` only |
-| `ci`        | `"quantile"`, `"wald"`                        | percentile of the adjusted draws vs estimate $\pm z \cdot \text{se}$ |
+| argument    | values                                     | meaning |
+|-------------|--------------------------------------------|---------|
+| `estimator` | `"ij"`, `"sandwich"`, `"ofs"`              | draw-based IJ, closed sandwich, or OFS |
+| `bread`     | `"mcmc"`, `"hessian_mle"`, `"hessian_map"` | inverse draw covariance or Hessian-based curvature $Q$; sandwich/OFS only |
+| `meat`      | `"score"`, `"score_avg"`                   | per-unit score covariance $P$ at one point or averaged over draws; sandwich/OFS only |
+| `ci`        | `"quantile"`, `"wald"`                     | adjusted-draw percentiles or mean $\pm z$ times the adjusted-draw SD |
 
-A scalar **magnitude** (scale) adjustment is available via
-`magnitude_adjust()` / `refit_magnitude_adjust()`. It is a single *global*
-scalar that rescales the whole pseudo-likelihood---a coarse correction of the
-overall posterior scale that, in general, does not reproduce a
-direction-dependent multivariate sandwich covariance.
-
-The rest of this vignette explains the **requirements** a model must satisfy
-for any of these adjustments to be available.
+A scalar **magnitude adjustment** (`magnitude_adjust()` and
+`refit_magnitude_adjust()`) rescales the whole composite likelihood and needs
+a refit. It cannot generally reproduce direction-dependent sandwich covariance.
 
 ## What a qualifying model must expose
 
-A model is eligible for post-hoc adjustment if and only if:
+A fit must satisfy two basic requirements for post-hoc adjustment:
 
 1. **It is a cmdstanr fit**---a `CmdStanMCMC` (or `CmdStanMLE`) object; and
-2. **It exposes a per-observation log-likelihood generated quantity**---a
-   vector named (by default) `log_lik`, with one entry per pseudo-observation.
-   This vector is what the adjustments are built from: the sandwich `meat` is
-   its per-observation Jacobian, and the IJ uses it directly.
-   `check_pl_requirements()` validates the vector **shape** only (that
-   `log_lik` exists and is a vector of length `m`); it does **not** verify
-   that the entries are contributions to independent observational units or
-   that they sum to the fitted pseudo-likelihood---that is the model author's
-   responsibility.
+2. **Its Stan program generates per-unit log-likelihood contributions**---a
+   vector named `log_lik` by default, with one entry for each independent
+   person or other observational unit. For pairwise likelihoods, sum *all*
+   item-pair contributions for one respondent into that respondent's entry;
+   do not use one entry per item pair. The score covariance uses derivatives
+   of these entries, while the IJ uses their variation across draws.
+   `check_pl_requirements()` checks its vector shape, not independence or
+   agreement with the fitted composite likelihood.
 
-If you also want the scalar *magnitude* (scale) adjustment, the model must
-**additionally accept a `magnitude_adj` data argument**, which rescales the
-whole pseudo-likelihood (`target += magnitude_adj * <pseudo-likelihood>`).
+For a scalar magnitude adjustment, the Stan program must also declare the
+`magnitude_adj` data argument and use it to multiply the entire composite
+log-likelihood. `refit_magnitude_adjust()` checks that the **refit model**
+declares the argument, but cannot verify that the code scales every contribution.
 
 Two further requirements apply to the Hessian-based breads
 (`"hessian_mle"` / `"hessian_map"`):
 
-- They evaluate the Hessian at an MLE/MAP, so they require a `model`/`data`
-  pair (or a pre-optimized `opt`/`opt_map`); currently there is **no** option for using MCMC-posterior-mean (the posterior mean is not an MLE or MAP and
-  would mislabel the point).
+- They require `model` and `data` or a pre-optimized `opt` / `opt_map` to
+  evaluate the Hessian at an MLE or MAP, not the MCMC posterior mean.
 - For `"hessian_mle"` to be a true likelihood-only MLE, the model must
-  disable **all** priors when `use_priors = 0`---the package cannot verify
-  that the Stan program honours that switch.
+  disable **all** prior terms when `use_priors = 0`; the package cannot
+  verify that the Stan program honors this switch. Check optimizer
+  convergence and Hessian conditioning as well: an optimizer exit code of
+  zero does not ensure a well-conditioned covariance estimate.
 
 ### A minimal qualifying model
 
-The package ships a tiny one-parameter model, `truelik.stan`, in
-`inst/test-models/`. It is a *true* per-observation likelihood, which is
-useful as a sanity check: every correction must be close to the identity function.
-Its essential structure is:
+The shipped `inst/test-models/truelik.stan` shows the required structure
+for independent normal observations:
 
 ```stan
 data {
   int<lower=1> N;
   vector[N] y;
-  real<lower=0> magnitude_adj;   // <- required for the magnitude adjustment
+  real<lower=0> magnitude_adj;   // needed for a magnitude refit
   int<lower=0, upper=1> use_priors;
 }
 parameters { real theta; }
@@ -140,27 +122,24 @@ model {
   for (n in 1:N) target += magnitude_adj * normal_lpdf(y[n] | theta, 1);
 }
 generated quantities {
-  vector[N] log_lik;             // <- required: one entry per pseudo-observation
+  vector[N] log_lik;             // one entry per independent observation
   for (n in 1:N) log_lik[n] = normal_lpdf(y[n] | theta, 1);
 }
 ```
 
-A genuine *pseudo*-likelihood model has the same shape, except the per-
-observation terms in the `model` block are pairwise / composite contributions
-rather than a joint likelihood. The requirements are unchanged: expose
-`log_lik` (one entry per pseudo-observation) and, for the magnitude
-adjustment, accept `magnitude_adj`.
+For an Ising pseudo-likelihood or pairwise factor model, sum each person's
+conditional or pairwise terms in **one entry per person**, not per symptom
+or item pair. At unit magnitude, `sum(log_lik)` should equal the composite
+log-likelihood in the model block, excluding priors.
 
 ## Checking the requirements
 
-`check_pl_requirements()` validates the requirements and returns, invisibly,
-the number of pseudo-observations `m` (the length of `log_lik`). If
-`log_lik` is missing
-it stops with a clear error naming the generated quantity it could not find;
-a **matrix-valued** `log_lik` (e.g. stored with 2-D brackets such as
-`log_lik[i, j]`) is also rejected, since the requirements call for a
-**vector** with one entry per pseudo-observation; with `need_magnitude = TRUE`
-it additionally requires the `magnitude_adj` data argument.
+`check_pl_requirements()` returns, invisibly, a list with `m` (the number
+of entries in `log_lik`) and `ok = TRUE`. A missing `log_lik` or a
+matrix-valued `log_lik` is rejected. A single entry is accepted with a
+warning because a per-unit covariance cannot be meaningfully estimated
+from just one unit. Setting `need_magnitude = TRUE` additionally checks
+that the fit's Stan program declares `magnitude_adj`.
 
 ```{r, eval = pp_stan}
 library(cmdstanr)
@@ -180,67 +159,35 @@ check_pl_requirements(fit, need_magnitude = TRUE)
 
 ## Running an adjustment
 
-`adjust_pseudo_posterior()` runs one or more adjustments across the
-`estimator` / `bread` / `meat` / `ci` axes on a fit that meets the
-requirements and
-returns a `pseudo_post` object containing a long-form table
-(`method, param, est, se, lo, hi`), the adjusted draws per method, and run
-metadata. Each axis may be a vector, so the axes run a sub-grid (one row per
-valid combination and parameter).
+`adjust_pseudo_posterior()` returns adjusted draws and estimates, SEs, and
+intervals for each requested combination and parameter. `ci = "quantile"`
+uses adjusted-draw percentiles; `"wald"` uses mean $\pm z$ times SD.
+Both default to 90% intervals (`ci_level = 0.90`); observed repeated-sampling
+coverage may differ.
 
 ```{r, eval = pp_stan}
-# New interface: the systematic estimator / bread / meat / ci grid.
 pp <- adjust_pseudo_posterior(
   fit, "theta",
-  estimator = "sandwich",
+  estimator = c("ij", "sandwich", "ofs"),
   bread = c("mcmc", "hessian_map"),
   meat = "score",
   ci = "quantile",
   model = model, data = dat, init = list(list(theta = 0.0)), verbose = FALSE)
-print(pp)
+pp$table
+pp$meta$warnings
 ```
 
-The original named presets remain as silent aliases for these axes (`methods =
-"noadj"` is the unadjusted baseline):
-
-```{r, eval = pp_stan}
-pp_legacy <- adjust_pseudo_posterior(
-  fit, "theta",
-  methods = c("noadj", "ijse", "ijse2", "curvadj", "curvadj2", "curvadj3"),
-  model = model, data = dat, init = list(list(theta = 0.0)), verbose = FALSE)
-print(pp_legacy)
-```
-
-Because `truelik` is a *true* likelihood, the information equality makes the
-meat equal the bread, so every correction is ~ the identity: the adjusted
-standard errors (e.g. the `"ij"` and `"sandwich"` rows) land within a few
-percent of the unadjusted `"noadj"` one. For a genuine pseudo-likelihood the
-adjusted standard errors are typically *larger* than the naive ones —
-precisely the anti-conservatism being corrected.
+Under the correctly specified normal model, $P = Q$ in expectation, so
+adjustments should approach the unadjusted result with enough data. For
+composite likelihoods or misspecified models, adjusted SEs can be **larger
+or smaller**. Assess coverage across repeated samples, not one dataset.
 
 ## The `pseudo_post` result object
 
-The result is a plain list of class `pseudo_post` with three elements:
-`table`, `draws`, and `meta`. It supports `print()`, `summary()`, and
-`as.data.frame()`:
-
-```{r}
-set.seed(1)
-pp <- structure(
-  list(table = data.frame(method = c("noadj", "ij.quant"),
-                          param = "theta",
-                          est = c(1.03, 1.05), se = c(0.09, 0.14),
-                          lo = c(0.86, 0.77), hi = c(1.20, 1.33),
-                          stringsAsFactors = FALSE),
-       draws = list(noadj = matrix(rnorm(20), 10, 2),
-                    ij.quant = matrix(rnorm(20), 10, 2)),
-       meta = list(fit = NULL, methods = c("noadj", "ij.quant"), ci_level = 0.90,
-                    ij_method = "proxy", warnings = character(0),
-                   notes = character(0))),
-  class = "pseudo_post")
-print(pp)
-as.data.frame(pp)
-```
+The `pseudo_post` object has `table` (`method`, `param`, `est`, `se`, `lo`,
+`hi`), `draws` (by method), and `meta` (settings and diagnostics); it supports
+`print()`, `summary()`, and `as.data.frame()`. Check `meta$warnings`: one
+method can fail while others return results.
 
 ## References
 
@@ -249,10 +196,6 @@ as.data.frame(pp)
   23(3), 853-876. <doi:10.1080/10618600.2013.842174>.
 - Giordano, R., & Broderick, T. (2023). The Bayesian Infinitesimal Jackknife
   for Variance. arXiv preprint arXiv:2305.06466. <doi:10.48550/arXiv.2305.06466>.
-- Ji, F., Lee, J., & Rabe-Hesketh, S. (2025). Valid standard errors for
-  Bayesian quantile regression with clustered and independent data.
-  *Journal of Educational and Behavioral Statistics*, 51(5), 1055-1084.
-  <doi:10.3102/10769986251379738>.
 - Godambe, V. P., & Heyde, C. C. (1975). Quasi-likelihood and optimal
   estimation. *Journal of the American Statistical Association*, 70(351),
   455-467.
