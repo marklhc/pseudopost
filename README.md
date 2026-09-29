@@ -46,7 +46,7 @@ contract, distinctions between methods, and a worked example.
 
 ``` r
 # From GitHub
-remotes::install_github("marklai/pseudopost")
+remotes::install_github("marklhc/pseudopost")
 ```
 
 Sampling and Hessian-based adjustments require `cmdstanr` and a working
